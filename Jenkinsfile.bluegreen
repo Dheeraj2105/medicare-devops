@@ -1,0 +1,173 @@
+pipeline {
+    agent any
+
+    parameters {
+        booleanParam(name: 'ROLLBACK_ONLY', defaultValue: false,
+                     description: 'Skip build and deploy; instantly switch LIVE traffic back to the other colour')
+    }
+
+    environment {
+        IMAGE      = 'dheeraj2105/medicare'
+        TAG        = "bg-${env.BUILD_NUMBER}"
+        KUBECONFIG = '/var/lib/jenkins/.kube/config'
+        NS         = 'medicare-bg'
+        BG_DIR     = 'k8s/bluegreen'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '15'))
+        disableConcurrentBuilds()
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Detect Live Colour') {
+            steps {
+                sh 'kubectl apply -f $BG_DIR/namespace.yaml && kubectl apply -f $BG_DIR/pvc.yaml'
+                script {
+                    def live = sh(returnStdout: true,
+                        script: 'kubectl -n $NS get svc medicare-live -o jsonpath="{.spec.selector.color}" 2>/dev/null || true').trim()
+                    env.LIVE_COLOR   = live ? live : 'none'
+                    env.TARGET_COLOR = (live == 'blue') ? 'green' : 'blue'
+                    env.SWITCHED     = 'false'
+                    echo "LIVE colour: ${env.LIVE_COLOR}  |  TARGET (idle) colour: ${env.TARGET_COLOR}"
+                }
+            }
+        }
+
+        stage('Unit Tests') {
+            when { expression { !params.ROLLBACK_ONLY } }
+            steps {
+                sh '''
+                  docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$WORKSPACE":/src -w /src python:3.12-slim \
+                    sh -c "pip install -q -r app/requirements.txt pytest && pytest -q -p no:cacheprovider tests"
+                '''
+            }
+        }
+
+        stage('Build & Push Image') {
+            when { expression { !params.ROLLBACK_ONLY } }
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds',
+                                                  usernameVariable: 'DH_USER',
+                                                  passwordVariable: 'DH_PASS')]) {
+                    sh '''
+                      docker build -t $IMAGE:$TAG .
+                      echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
+                      docker push $IMAGE:$TAG
+                    '''
+                }
+            }
+        }
+
+        stage('Deploy to Idle Colour') {
+            when { expression { !params.ROLLBACK_ONLY } }
+            steps {
+                sh '''
+                  sed -e "s|COLOR_PLACEHOLDER|$TARGET_COLOR|g" \
+                      -e "s|IMAGE_PLACEHOLDER|$IMAGE:$TAG|g" \
+                      -e "s|VERSION_PLACEHOLDER|$TAG|g" $BG_DIR/deployment.yaml | kubectl apply -f -
+                  kubectl -n $NS rollout status deployment/medicare-$TARGET_COLOR --timeout=180s
+                '''
+            }
+        }
+
+        stage('Preview & Smoke Test') {
+            when { expression { !params.ROLLBACK_ONLY } }
+            steps {
+                sh '''
+                  sed "s|COLOR_PLACEHOLDER|$TARGET_COLOR|g" $BG_DIR/service-preview.yaml | kubectl apply -f -
+                  NODE_IP=$(hostname -I | awk '{print $1}')
+                  for i in $(seq 1 12); do
+                    COLOR=$(curl -fsS http://$NODE_IP:30091/api/info | python3 -c "import sys,json; print(json.load(sys.stdin)['color'])" || true)
+                    if [ "$COLOR" = "$TARGET_COLOR" ]; then
+                      curl -fsS http://$NODE_IP:30091/health
+                      echo ""
+                      echo "PREVIEW OK - $TARGET_COLOR is healthy on port 30091"
+                      exit 0
+                    fi
+                    sleep 5
+                  done
+                  echo "Preview smoke test FAILED"
+                  exit 1
+                '''
+            }
+        }
+
+        stage('Approve Switch') {
+            when { expression { !params.ROLLBACK_ONLY } }
+            steps {
+                timeout(time: 15, unit: 'MINUTES') {
+                    input message: "New version is on PREVIEW (port 30091, ${env.TARGET_COLOR}). Switch LIVE traffic from ${env.LIVE_COLOR} to ${env.TARGET_COLOR}?",
+                          ok: 'Switch traffic'
+                }
+            }
+        }
+
+        stage('Switch Live Traffic') {
+            steps {
+                script {
+                    if (params.ROLLBACK_ONLY) {
+                        if (env.LIVE_COLOR == 'none') {
+                            error('Nothing is live yet - cannot roll back')
+                        }
+                        def ready = sh(returnStdout: true,
+                            script: 'kubectl -n $NS get deploy medicare-$TARGET_COLOR -o jsonpath="{.status.readyReplicas}" 2>/dev/null || true').trim()
+                        if (!ready || ready == '0') {
+                            error("No ready ${env.TARGET_COLOR} deployment to roll back to")
+                        }
+                        echo "ROLLBACK: switching LIVE from ${env.LIVE_COLOR} back to ${env.TARGET_COLOR}"
+                    }
+                }
+                sh '''
+                  sed "s|COLOR_PLACEHOLDER|$TARGET_COLOR|g" $BG_DIR/service-live.yaml | kubectl apply -f -
+                  echo "LIVE traffic now -> $TARGET_COLOR (previous: $LIVE_COLOR)"
+                '''
+                script {
+                    env.SWITCHED = 'true'
+                }
+            }
+        }
+
+        stage('Verify Live') {
+            steps {
+                sh '''
+                  NODE_IP=$(hostname -I | awk '{print $1}')
+                  for i in $(seq 1 12); do
+                    COLOR=$(curl -fsS http://$NODE_IP:30090/api/info | python3 -c "import sys,json; print(json.load(sys.stdin)['color'])" || true)
+                    if [ "$COLOR" = "$TARGET_COLOR" ]; then
+                      echo "LIVE OK - port 30090 is serving $COLOR"
+                      exit 0
+                    fi
+                    sleep 5
+                  done
+                  echo "LIVE verification FAILED"
+                  exit 1
+                '''
+            }
+        }
+    }
+
+    post {
+        failure {
+            script {
+                if (env.SWITCHED == 'true' && (env.LIVE_COLOR == 'blue' || env.LIVE_COLOR == 'green')) {
+                    echo "AUTO-ROLLBACK: restoring LIVE traffic to ${env.LIVE_COLOR}"
+                    sh 'sed "s|COLOR_PLACEHOLDER|$LIVE_COLOR|g" $BG_DIR/service-live.yaml | kubectl apply -f -'
+                }
+            }
+        }
+        success {
+            sh 'kubectl -n $NS get deploy,svc,pods -o wide'
+            echo "LIVE: http://<EC2-PUBLIC-IP>:30090  |  PREVIEW: http://<EC2-PUBLIC-IP>:30091"
+        }
+        always {
+            sh 'docker logout || true; docker image prune -f || true'
+        }
+    }
+}
