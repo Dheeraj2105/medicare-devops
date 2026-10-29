@@ -1,11 +1,11 @@
-apiVersion: v1
-kind: PersistentVolumeClaim
-metadata:
-  name: medicare-data
-  namespace: medicare
-spec:
-  accessModes: ["ReadWriteOnce"]
-  storageClassName: local-path
-  resources:
-    requests:
-      storage: 1Gi
+   apiVersion: v1
+   kind: PersistentVolumeClaim
+   metadata:
+     name: medicare-data
+     namespace: medicare-bg
+   spec:
+     accessModes: ["ReadWriteOnce"]
+     storageClassName: local-path
+     resources:
+       requests:
+         storage: 1Gi
