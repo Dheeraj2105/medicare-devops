@@ -1,0 +1,117 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediCare+ | Hospital Management</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">&#10010;</span> MediCare<span class="plus">+</span></div>
+  <nav class="tabs">
+    <button class="tab active" data-view="dashboard">Dashboard</button>
+    <button class="tab" data-view="patients">Patients</button>
+    <button class="tab" data-view="appointments">Appointments</button>
+    <button class="tab" data-view="doctors">Doctors</button>
+  </nav>
+  <div class="env badge-{{ color }}">{{ color|upper }} &middot; v{{ version }}</div>
+</header>
+
+<main>
+  <section id="view-dashboard" class="view active">
+    <h1>Hospital Overview</h1>
+    <div class="cards">
+      <div class="card"><div class="card-label">Patients</div><div class="card-value" id="statPatients">-</div></div>
+      <div class="card"><div class="card-label">Doctors</div><div class="card-value" id="statDoctors">-</div></div>
+      <div class="card"><div class="card-label">Today's appointments</div><div class="card-value" id="statToday">-</div></div>
+      <div class="card"><div class="card-label">Scheduled</div><div class="card-value" id="statScheduled">-</div></div>
+      <div class="card"><div class="card-label">Completed</div><div class="card-value" id="statCompleted">-</div></div>
+    </div>
+    <div class="panel">
+      <h2>Upcoming appointments</h2>
+      <table>
+        <thead><tr><th>When</th><th>Patient</th><th>Doctor</th><th>Status</th></tr></thead>
+        <tbody id="upcomingBody"></tbody>
+      </table>
+    </div>
+    <div class="panel meta">
+      Served by pod <code id="podName">-</code> &middot; Patient phone numbers are masked (PHI protection) &middot; All inputs are server-side validated.
+    </div>
+  </section>
+
+  <section id="view-patients" class="view">
+    <h1>Patients</h1>
+    <div class="grid2">
+      <form id="patientForm" class="panel form" autocomplete="off">
+        <h2>Register patient</h2>
+        <label>Full name<input name="name" required maxlength="80"></label>
+        <label>Age<input name="age" type="number" min="0" max="130" required></label>
+        <label>Gender
+          <select name="gender"><option>Male</option><option>Female</option><option>Other</option></select>
+        </label>
+        <label>Blood group
+          <select name="blood_group">
+            <option>A+</option><option>A-</option><option>B+</option><option>B-</option>
+            <option>AB+</option><option>AB-</option><option>O+</option><option>O-</option>
+          </select>
+        </label>
+        <label>Phone (10 digits)<input name="phone" required pattern="[0-9]{10}" maxlength="10"></label>
+        <label>Diagnosis<input name="diagnosis" maxlength="200"></label>
+        <button type="submit" class="primary">Register</button>
+        <p class="msg" id="patientMsg"></p>
+      </form>
+      <div class="panel">
+        <div class="toolbar">
+          <h2>All patients</h2>
+          <input id="patientSearch" placeholder="Search name or diagnosis">
+        </div>
+        <table>
+          <thead><tr><th>ID</th><th>Name</th><th>Age</th><th>Gender</th><th>Blood</th><th>Phone</th><th>Diagnosis</th><th></th></tr></thead>
+          <tbody id="patientBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-appointments" class="view">
+    <h1>Appointments</h1>
+    <div class="grid2">
+      <form id="apptForm" class="panel form" autocomplete="off">
+        <h2>Book appointment</h2>
+        <label>Patient<select name="patient_id" id="apptPatient"></select></label>
+        <label>Doctor<select name="doctor_id" id="apptDoctor"></select></label>
+        <label>Date<input name="date" id="apptDate" type="date" required></label>
+        <label>Time<input name="time" type="time" required value="10:00"></label>
+        <label>Reason<input name="reason" maxlength="200"></label>
+        <button type="submit" class="primary">Book</button>
+        <p class="msg" id="apptMsg"></p>
+      </form>
+      <div class="panel">
+        <div class="toolbar">
+          <h2>Schedule</h2>
+          <select id="apptFilter">
+            <option value="">All statuses</option>
+            <option value="scheduled">Scheduled</option>
+            <option value="completed">Completed</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+        </div>
+        <table>
+          <thead><tr><th>Date</th><th>Time</th><th>Patient</th><th>Doctor</th><th>Reason</th><th>Status</th><th>Actions</th></tr></thead>
+          <tbody id="apptBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </section>
+
+  <section id="view-doctors" class="view">
+    <h1>Doctors</h1>
+    <div class="doctor-grid" id="doctorGrid"></div>
+  </section>
+</main>
+
+<footer>MediCare+ &middot; Secure healthcare records platform &middot; Jenkins &rarr; Docker &rarr; Kubernetes on AWS</footer>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

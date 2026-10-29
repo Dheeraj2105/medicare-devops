@@ -1,0 +1,7 @@
+.git
+tests
+k8s
+Jenkinsfile*
+README.md
+**/__pycache__
+**/*.pyc
