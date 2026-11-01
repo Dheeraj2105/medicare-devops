@@ -1,0 +1,36 @@
+# MediCare+ hardened deployment (Task 9 - DevSecOps)
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: medicare-sa
+  namespace: medicare-secure
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: medicare-least-privilege
+  namespace: medicare-secure
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: medicare-least-privilege
+  namespace: medicare-secure
+subjects:
+  - kind: ServiceAccount
+    name: medicare-sa
+    namespace: medicare-secure
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: medicare-least-privilege
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name:
