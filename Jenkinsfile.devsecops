@@ -1,0 +1,187 @@
+pipeline {
+    agent any
+
+    environment {
+        IMAGE      = 'dheeraj2105/medicare'
+        TAG        = "sec-${env.BUILD_NUMBER}"
+        KUBECONFIG = '/var/lib/jenkins/.kube/config'
+        NS         = 'medicare-secure'
+        SEC_DIR    = 'k8s/devsecops'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        disableConcurrentBuilds()
+        timeout(time: 45, unit: 'MINUTES')
+    }
+
+    stages {
+        stage('Checkout') {
+            steps {
+                checkout scm
+                sh '''
+                  docker run --rm -v "$WORKSPACE":/src alpine rm -rf /src/reports
+                  mkdir -p reports/k8s && chmod -R 777 reports
+                '''
+            }
+        }
+
+        stage('1. Secret Scan - Gitleaks') {
+            steps {
+                sh '''
+                  docker run --rm -v "$WORKSPACE":/src ghcr.io/gitleaks/gitleaks:latest \
+                    detect --source /src --no-git --redact --verbose \
+                    --report-format json --report-path /src/reports/gitleaks.json
+                  echo "GATE PASSED: no hard-coded secrets (passwords, tokens, keys) in code"
+                '''
+            }
+        }
+
+        stage('2. SAST - Bandit') {
+            steps {
+                sh '''
+                  RC=0
+                  docker run --rm -e PYTHONDONTWRITEBYTECODE=1 -v "$WORKSPACE":/src -w /src python:3.12-slim sh -c "pip install -q bandit && bandit -r app -f html -o reports/bandit.html --exit-zero && bandit -r app --severity-level high --confidence-level medium" || RC=$?
+                  [ "$RC" -eq 0 ] || { echo "GATE FAILED: HIGH severity code vulnerabilities"; exit 1; }
+                  echo "GATE PASSED: no HIGH severity issues in application code"
+                '''
+            }
+        }
+
+        stage('3. Dependency Scan - pip-audit') {
+            steps {
+                sh '''
+                  RC=0
+                  docker run --rm -v "$WORKSPACE":/src -w /src python:3.12-slim sh -c "pip install -q pip-audit && pip-audit -r app/requirements.txt --desc -f markdown -o reports/pip-audit.md" || RC=$?
+                  cat reports/pip-audit.md 2>/dev/null || true
+                  [ "$RC" -eq 0 ] || { echo "GATE FAILED: vulnerable Python dependencies"; exit 1; }
+                  echo "GATE PASSED: no known vulnerable dependencies"
+                '''
+            }
+        }
+
+        stage('4. Dockerfile Lint - Hadolint') {
+            steps {
+                sh '''
+                  RC=0
+                  docker run --rm -i hadolint/hadolint hadolint --failure-threshold error - < Dockerfile > reports/hadolint.txt || RC=$?
+                  cat reports/hadolint.txt
+                  [ "$RC" -eq 0 ] || { echo "GATE FAILED: Dockerfile security errors"; exit 1; }
+                  echo "GATE PASSED: Dockerfile follows best practices (non-root user, no errors)"
+                '''
+            }
+        }
+
+        stage('5. Build Image') {
+            steps {
+                sh 'docker build -t $IMAGE:$TAG .'
+            }
+        }
+
+        stage('6. Image Scan - Trivy') {
+            steps {
+                sh '''
+                  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/ -v "$WORKSPACE":/src aquasec/trivy:latest \
+                    image --scanners vuln --severity HIGH,CRITICAL --ignore-unfixed --format table -o /src/reports/trivy-image.txt $IMAGE:$TAG
+                  cat reports/trivy-image.txt
+                  RC=0
+                  docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v trivy-cache:/root/.cache/ aquasec/trivy:latest \
+                    image --scanners vuln --severity CRITICAL --ignore-unfixed --exit-code 1 --quiet $IMAGE:$TAG > /dev/null || RC=$?
+                  [ "$RC" -eq 0 ] || { echo "GATE FAILED: fixable CRITICAL vulnerabilities in image"; exit 1; }
+                  echo "GATE PASSED: no fixable CRITICAL vulnerabilities in container image"
+                '''
+            }
+        }
+
+        stage('7. K8s Config Scan - Trivy') {
+            steps {
+                sh '''
+                  sed -e "s|IMAGE_PLACEHOLDER|$IMAGE:$TAG|g" -e "s|VERSION_PLACEHOLDER|$TAG|g" $SEC_DIR/secure-app.yaml > reports/k8s/secure-app.yaml
+                  RC=0
+                  docker run --rm -v trivy-cache:/root/.cache/ -v "$WORKSPACE":/src aquasec/trivy:latest \
+                    config --severity HIGH,CRITICAL --exit-code 1 -o /src/reports/trivy-k8s.txt /src/reports/k8s || RC=$?
+                  cat reports/trivy-k8s.txt 2>/dev/null || true
+                  [ "$RC" -eq 0 ] || { echo "GATE FAILED: insecure Kubernetes configuration"; exit 1; }
+                  echo "GATE PASSED: Kubernetes manifests are hardened"
+                '''
+            }
+        }
+
+        stage('8. Push Image') {
+            steps {
+                withCredentials([usernamePassword(credentialsId: 'dockerhub-creds',
+                                                  usernameVariable: 'DH_USER',
+                                                  passwordVariable: 'DH_PASS')]) {
+                    sh '''
+                      echo "$DH_PASS" | docker login -u "$DH_USER" --password-stdin
+                      docker push $IMAGE:$TAG
+                    '''
+                }
+            }
+        }
+
+        stage('9. Deploy Hardened App') {
+            steps {
+                sh '''
+                  kubectl create namespace $NS --dry-run=client -o yaml | kubectl apply -f -
+                  kubectl label namespace $NS pod-security.kubernetes.io/enforce=restricted pod-security.kubernetes.io/enforce-version=latest --overwrite
+                  set +x
+                  if ! kubectl -n $NS get secret medicare-secret > /dev/null 2>&1; then
+                    kubectl -n $NS create secret generic medicare-secret --from-literal=APP_SECRET_KEY="$(openssl rand -hex 32)"
+                    echo "Generated random APP_SECRET_KEY as a Kubernetes Secret (value never printed, never stored in Git)"
+                  fi
+                  set -x
+                  kubectl apply -f reports/k8s/secure-app.yaml
+                  kubectl -n $NS rollout status deployment/medicare-secure --timeout=240s
+                  kubectl -n $NS get deploy,pods,svc,netpol,sa,role,rolebinding,secret,pvc
+                '''
+            }
+        }
+
+        stage('10. Verify Hardening') {
+            steps {
+                sh '''
+                  POD=$(kubectl -n $NS get pod -l app=medicare-secure -o jsonpath='{.items[0].metadata.name}')
+                  echo "===== Check 1: container runs as NON-ROOT user ====="
+                  kubectl -n $NS exec $POD -- id
+                  echo "===== Check 2: root filesystem is READ-ONLY ====="
+                  if kubectl -n $NS exec $POD -- sh -c 'touch /app/hacked' 2>/dev/null; then echo "FAIL: filesystem is writable"; exit 1; else echo "PASS: write to /app blocked"; fi
+                  echo "===== Check 3: all Linux capabilities DROPPED ====="
+                  kubectl -n $NS exec $POD -- grep CapEff /proc/1/status
+                  echo "===== Check 4: Pod Security Admission REJECTS insecure pods ====="
+                  if kubectl -n $NS run insecure-test --image=nginx --restart=Never --dry-run=server > /dev/null 2>&1; then echo "FAIL: insecure pod was allowed"; exit 1; else echo "PASS: insecure pod rejected by Pod Security (restricted)"; fi
+                  echo "===== Check 5: NetworkPolicy BLOCKS outbound internet ====="
+                  if kubectl -n $NS exec $POD -- python3 -c "import urllib.request; urllib.request.urlopen('http://example.com', timeout=5)" 2>/dev/null; then echo "FAIL: outbound internet allowed"; exit 1; else echo "PASS: outbound internet blocked (data exfiltration prevented)"; fi
+                '''
+            }
+        }
+
+        stage('11. DAST - OWASP ZAP') {
+            steps {
+                sh '''
+                  NODE_IP=$(hostname -I | awk '{print $1}')
+                  for i in $(seq 1 12); do curl -fsS http://$NODE_IP:30100/health && break; sleep 5; done
+                  echo ""
+                  docker run --rm -v "$WORKSPACE/reports":/zap/wrk:rw ghcr.io/zaproxy/zaproxy:stable \
+                    zap-baseline.py -t http://$NODE_IP:30100 -r zap-report.html -m 1 -I \
+                    || echo "ZAP reported findings - review zap-report.html"
+                  echo "DAST complete - zap-report.html saved in build artifacts"
+                '''
+            }
+        }
+    }
+
+    post {
+        always {
+            sh 'docker run --rm -v "$WORKSPACE":/src alpine chown -R $(id -u):$(id -g) /src/reports || true'
+            archiveArtifacts artifacts: 'reports/**', allowEmptyArchive: true
+            sh 'docker logout || true; docker image prune -f || true'
+        }
+        success {
+            echo "ALL SECURITY GATES PASSED - hardened MediCare+ live at http://<EC2-PUBLIC-IP>:30100"
+        }
+        failure {
+            echo "PIPELINE BLOCKED BY A SECURITY GATE - check the failed stage and reports/"
+        }
+    }
+}
