@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MediCare+ | Smart Triage</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><span class="logo">&#10010;</span> MediCare<span class="plus">+</span></div>
+  <nav class="tabs">
+    <a class="tab" href="/">Dashboard</a>
+    <a class="tab active" href="/triage">Smart Triage</a>
+  </nav>
+  <div class="env badge-{{ color }}">{{ color|upper }} &middot; v{{ version }}</div>
+</header>
+
+<main>
+  <h1>Smart Triage Queue</h1>
+  <p class="meta">Patients are ranked automatically by an explainable risk score (0-100) based on age, diagnosis and blood-group rarity. Every score shows its reasons.</p>
+
+  <div class="cards">
+    {% for level in levels %}
+    <div class="card"><div class="card-label">{{ level }}</div><div class="card-value">{{ counts[level] }}</div></div>
+    {% endfor %}
+  </div>
+
+  <div class="panel">
+    <h2>Priority queue</h2>
+    <table>
+      <thead><tr><th>Rank</th><th>Patient</th><th>Age</th><th>Diagnosis</th><th>Score</th><th>Level</th><th>Why</th></tr></thead>
+      <tbody>
+      {% for p in queue %}
+        <tr>
+          <td>#{{ loop.index }}</td>
+          <td>{{ p.name }}</td>
+          <td>{{ p.age }}</td>
+          <td>{{ p.diagnosis or "-" }}</td>
+          <td><strong>{{ p.score }}</strong></td>
+          <td><span class="{{ p.css }}">{{ p.level }}</span></td>
+          <td>{{ p.reasons | join(", ") }}</td>
+        </tr>
+      {% else %}
+        <tr><td colspan="7" class="empty">No patients registered yet</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</main>
+
+<footer>MediCare+ &middot; Smart Triage (explainable clinical decision support)</footer>
+</body>
+</html>
