@@ -12,7 +12,7 @@ RULES = [
     (("chest pain", "heart attack", "cardiac", "stroke", "seizure",
       "unconscious", "bleeding", "breathless", "difficulty breathing"), 50, "Emergency symptom"),
     (("fracture", "high fever", "infection", "asthma", "diabetes",
-      "hypertension", "pneumonia", "covid"), 25, "Serious condition"),
+              "hypertension", "pneumonia", "covid", "cancer", "tumor"), 25, "Serious condition"),
     (("fever", "cough", "pain", "injury", "vomiting", "headache"), 10, "Common symptom"),
 ]
 RARE_BLOOD = ("A-", "B-", "AB-", "O-")
